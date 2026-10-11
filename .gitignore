@@ -1,0 +1,28 @@
+# Terraform: archivos locales y temporales
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Valores locales (pueden contener datos propios de tu cuenta)
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Secretos
+.env
+*.pem
+*.key
+
+# Se versiona el lock de providers para tener versiones reproducibles
+# (.terraform.lock.hcl NO se ignora)
+
+# Sistema
+.DS_Store

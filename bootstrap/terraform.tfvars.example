@@ -1,0 +1,5 @@
+# Copiá este archivo a terraform.tfvars y completá tus valores.
+
+aws_region        = "us-east-2"
+state_bucket_name = "tfstate-TU-NOMBRE-dev-12345" # debe ser único a nivel global
+lock_table_name   = "terraform-state-lock"

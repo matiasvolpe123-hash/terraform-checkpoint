@@ -1,0 +1,10 @@
+# Copiá este archivo a terraform.tfvars y completá tus valores.
+# terraform.tfvars esta ignorado por git (ver .gitignore).
+
+aws_region       = "us-east-2"
+environment      = "dev"
+data_bucket_name = "mi-bucket-de-datos-dev"
+data_prefix      = "streaming/raw"
+
+# Opcional: quién puede asumir el rol de auditoría. Vacío = cuenta actual.
+# audit_trusted_principal_arns = ["arn:aws:iam::123456789012:user/auditor"]
