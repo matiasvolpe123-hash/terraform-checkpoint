@@ -139,3 +139,76 @@ Terraform 1.10 y posteriores permiten bloquear el estado directamente en S3 (`us
 ## Nota sobre la región
 
 Este proyecto se probó en `us-east-2` (Ohio). La cuenta de trabajo pertenece a una organización de AWS con una service control policy que bloquea la creación de recursos en `us-east-1`. Si tu cuenta tiene otras restricciones, ajustá la región en `bootstrap/`, en `environments/dev/backend.tf` y en `environments/dev/terraform.tfvars`.
+
+## Ingesta con Kinesis y Firehose
+
+Rama `feature/ingesta-kinesis`. Agrega un pipeline de ingesta de eventos:
+
+```
+productor --> Kinesis Data Stream (KMS, 2 shards) --> Firehose --> S3 (Data Lake)
+                                                         |
+                                                         +--> CloudWatch Logs (errores de entrega)
+```
+
+### Recursos nuevos
+
+| Módulo | Recurso | Descripción |
+|---|---|---|
+| `modules/datalake` | `aws_s3_bucket` | Bucket del Data Lake, con cifrado SSE y sin acceso público |
+| `modules/kinesis` | `aws_kinesis_stream` | Stream en modo `PROVISIONED`, 2 shards, `encryption_type = "KMS"`. El nombre sale de `project` y `environment` (`datalake-dev-events`) |
+| `modules/kinesis` | `aws_kms_key` + alias | Clave propia (con rotación) que cifra el stream |
+| `modules/kinesis` | `aws_kinesis_firehose_delivery_stream` | Source = el stream, destino S3, buffer de 5 MB o 60 s |
+| `modules/kinesis` | `aws_iam_role` + política | Rol de Firehose: leer del stream, descifrar con la clave, escribir en el prefijo del bucket y escribir logs |
+| `modules/kinesis` | `aws_cloudwatch_log_group` | Logs de errores de entrega de Firehose |
+
+Nota: el recurso de Firehose usa `destination = "extended_s3"`, que es el valor actual del proveedor de AWS para entregar a S3 (el valor `s3` es la forma antigua).
+
+### Desplegar
+
+```bash
+git checkout feature/ingesta-kinesis
+cd environments/dev
+terraform init
+terraform plan
+terraform apply
+```
+
+### Validar: enviar un evento de prueba
+
+```bash
+aws kinesis put-record \
+  --stream-name datalake-dev-events \
+  --partition-key sensor-1 \
+  --data '{"sensor_id":"s1","temperatura":21.5}' \
+  --cli-binary-format raw-in-base64-out \
+  --region us-east-2
+```
+
+Si funciona, devuelve un `ShardId` y un `SequenceNumber`.
+
+Firehose junta los datos hasta 60 segundos (o 5 MB), así que esperá un poco más de un minuto y listá el bucket:
+
+```bash
+aws s3 ls s3://datalake-<ID-DE-CUENTA>-dev/streaming/raw/ --recursive --region us-east-2
+```
+
+Los archivos quedan en `streaming/raw/AAAA/MM/DD/HH/`. Para ver el contenido:
+
+```bash
+aws s3 cp s3://<bucket>/<ruta-del-archivo> - --region us-east-2
+```
+
+Salida del `ls` de S3 con el archivo generado por Firehose:
+
+```
+(pegar acá la salida de aws s3 ls o una captura)
+```
+
+### Costos y limpieza
+
+El stream cobra por shard y por hora aunque no reciba datos (con 2 shards son unos centavos de dólar por hora). Cuando termines de validar:
+
+```bash
+cd environments/dev
+terraform destroy
+```
