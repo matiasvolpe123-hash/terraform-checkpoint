@@ -1,5 +1,7 @@
 # Terraform: archivos locales y temporales
 .terraform/
+work/
+flink/target/
 *.tfstate
 *.tfstate.*
 crash.log

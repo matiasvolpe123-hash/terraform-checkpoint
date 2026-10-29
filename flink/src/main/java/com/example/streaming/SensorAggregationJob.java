@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Properties;
 import java.util.Map;
+import java.util.HashMap;
 
 /** One-minute event-time temperature summaries, keyed by sensor_id. */
 public final class SensorAggregationJob {
@@ -29,7 +30,9 @@ public final class SensorAggregationJob {
     public static void main(String[] args) throws Exception {
         Map<String, Properties> applicationProperties = KinesisAnalyticsRuntime.getApplicationProperties();
         Properties flinkProperties = applicationProperties.getOrDefault("FlinkApplicationProperties", new Properties());
-        ParameterTool params = ParameterTool.fromProperties(flinkProperties)
+        Map<String, String> propertyMap = new HashMap<>();
+        for (String name : flinkProperties.stringPropertyNames()) propertyMap.put(name, flinkProperties.getProperty(name));
+        ParameterTool params = ParameterTool.fromMap(propertyMap)
                 .mergeWith(ParameterTool.fromArgs(args));
         String streamName = required(params, "stream", "STREAM_NAME");
         String region = params.get("region", System.getenv().getOrDefault("AWS_REGION", "us-east-2"));
@@ -65,11 +68,8 @@ public final class SensorAggregationJob {
     }
 
     private static String required(ParameterTool params, String parameter, String environmentVariable) {
-        String propertyName = switch (parameter) {
-            case "stream" -> "STREAM_NAME";
-            case "region" -> "AWS_REGION";
-            default -> parameter;
-        };
+        String propertyName = parameter.equals("stream") ? "STREAM_NAME"
+                : parameter.equals("region") ? "AWS_REGION" : parameter;
         String value = params.get(propertyName, System.getenv(environmentVariable));
         if (value == null || value.isBlank()) throw new IllegalArgumentException(
                 "Set --" + parameter + " or " + environmentVariable);
