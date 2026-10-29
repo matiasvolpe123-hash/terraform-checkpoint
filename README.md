@@ -212,3 +212,58 @@ El stream cobra por shard y por hora aunque no reciba datos (con 2 shards son un
 cd environments/dev
 terraform destroy
 ```
+
+## Procesamiento en tiempo real con Managed Service for Apache Flink (Módulo 3)
+
+El módulo agrega una aplicación Java de Apache Flink que lee directamente del Kinesis Data Stream `datalake-<environment>-events` creado arriba. Firehose sigue almacenando los eventos crudos en S3; Flink procesa el stream en paralelo.
+
+La lógica espera JSON con `sensor_id` y `temperatura`. Agrupa por sensor en ventanas tumbling de tiempo de evento de un minuto, y emite a los logs de CloudWatch un JSON con cantidad, promedio, mínimo y máximo. Para el tiempo de evento acepta `event_time` o `timestamp` como epoch en milisegundos o fecha ISO-8601. Si falta la marca de tiempo, usa la hora de ingestión como respaldo. El watermark admite diez segundos de desorden; los eventos que llegan más tarde que el watermark pueden quedar fuera de la ventana.
+
+La clave por `sensor_id` y el estado de la ventana administrado por Flink conservan los acumuladores durante la ventana. No se requiere estado keyed adicional fuera del estado de ventanas. Los checkpoints están activos cada 60 segundos, con 30 segundos mínimos entre ellos.
+
+### Paralelismo y KPUs
+
+El stream existente tiene dos shards y el job inicia con paralelismo 2 para que ambas particiones puedan procesarse concurrentemente. `parallelism_per_kpu = 1` deja un operador paralelo por KPU como configuración inicial; el consumo real de KPUs depende del grafo y carga del job. El autoescalado queda deshabilitado para que la capacidad y el costo sean previsibles. Se pueden ajustar los valores `flink_parallelism`, `flink_parallelism_per_kpu` y `flink_auto_scaling_enabled` en `environments/dev/terraform.tfvars`.
+
+La aplicación Managed Flink no se enlaza a la VPC privada: el job se comunica con Kinesis mediante el endpoint del servicio AWS y no requiere salida general a Internet ni acceso a servicios privados. Si más adelante se conecta a destinos privados, deberá añadirse la configuración de VPC, subredes y security groups junto con conectividad al destino.
+
+### Compilar y desplegar
+
+Requisitos adicionales: JDK 11 y Maven 3.8 o posterior.
+
+```bash
+cd flink
+mvn clean package
+cd ../environments/dev
+terraform init
+terraform plan
+terraform apply
+```
+
+Terraform carga `flink/target/flink-kinesis-processor.jar` al prefijo `applications/flink/` del bucket Data Lake y configura `aws_kinesisanalyticsv2_application`, el rol de ejecución, checkpoints, paralelismo y CloudWatch Logs. El job comienza desde `TRIM_HORIZON` para procesar los registros retenidos en el stream.
+
+Enviar un evento de ejemplo (se usa hora de ingestión si no se incluye timestamp):
+
+```bash
+aws kinesis put-record \
+  --stream-name datalake-dev-events \
+  --partition-key sensor-1 \
+  --data '{"sensor_id":"sensor-1","temperatura":21.5,"event_time":"2026-10-29T12:00:00Z"}' \
+  --cli-binary-format raw-in-base64-out --region us-east-2
+```
+
+La salida del sink `print` aparece en los logs de la aplicación. Para consultar la evidencia:
+
+```bash
+aws logs tail "$(terraform output -raw flink_log_group_name)" --since 10m --follow --region us-east-2
+```
+
+Adjuntá a la entrega una captura de la pestaña **Real-time dashboard / Graph** de la aplicación en la consola de Managed Service for Apache Flink o la salida de CloudWatch con líneas `temperature-summary`. Esta evidencia requiere desplegar y ejecutar el job en una cuenta AWS; Terraform y el código por sí solos no prueban una ejecución.
+
+### Estructura
+
+```text
+flink/                         # Código Java y Maven del job
+modules/flink/                 # Aplicación Managed Flink, IAM y logs
+environments/dev/ingesta.tf    # Sube el JAR y conecta Flink al stream del Módulo 2
+```

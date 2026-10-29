@@ -36,3 +36,49 @@ output "datalake_bucket_name" {
   description = "Bucket S3 del Data Lake donde Firehose entrega los archivos."
   value       = module.datalake.bucket_name
 }
+
+resource "aws_s3_object" "flink_application" {
+  bucket       = module.datalake.bucket_name
+  key          = "applications/flink/flink-kinesis-processor.jar"
+  source       = var.flink_jar_path
+  source_hash  = filebase64sha256(var.flink_jar_path)
+  content_type = "application/java-archive"
+}
+
+module "flink" {
+  source = "../../modules/flink"
+
+  name                             = "datalake-${var.environment}-sensor-aggregation"
+  aws_region                       = var.aws_region
+  kinesis_stream_arn               = module.kinesis.stream_arn
+  kinesis_stream_name              = module.kinesis.stream_name
+  kinesis_kms_key_arn              = module.kinesis.kms_key_arn
+  application_code_bucket_arn      = module.datalake.bucket_arn
+  application_code_key             = aws_s3_object.flink_application.key
+  application_code_object_arn      = aws_s3_object.flink_application.arn
+  parallelism                      = var.flink_parallelism
+  parallelism_per_kpu              = var.flink_parallelism_per_kpu
+  auto_scaling_enabled             = var.flink_auto_scaling_enabled
+  window_minutes                   = var.flink_window_minutes
+  out_of_order_seconds             = var.flink_out_of_order_seconds
+  checkpoint_interval_ms           = var.flink_checkpoint_interval_ms
+  min_pause_between_checkpoints_ms = var.flink_min_pause_between_checkpoints_ms
+  tags = {
+    Environment = var.environment
+    Project     = "data-engineering-checkpoint"
+    ManagedBy   = "terraform"
+  }
+}
+
+output "flink_application_name" {
+  description = "Nombre de la aplicación Managed Service for Apache Flink."
+  value       = module.flink.application_name
+}
+
+output "flink_application_arn" {
+  value = module.flink.application_arn
+}
+
+output "flink_log_group_name" {
+  value = module.flink.log_group_name
+}
