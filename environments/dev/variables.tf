@@ -38,3 +38,48 @@ variable "audit_trusted_principal_arns" {
   type        = list(string)
   default     = []
 }
+
+variable "flink_jar_path" {
+  description = "Ruta al JAR sombreado generado con Maven antes de ejecutar Terraform (relativa a environments/dev)."
+  type        = string
+  default     = "../../flink/target/flink-kinesis-processor.jar"
+}
+
+variable "flink_parallelism" {
+  description = "Paralelismo global inicial del job; se alinea con los dos shards del stream."
+  type        = number
+  default     = 2
+}
+
+variable "flink_parallelism_per_kpu" {
+  description = "Operadores paralelos permitidos por KPU para dimensionar Managed Flink."
+  type        = number
+  default     = 1
+}
+
+variable "flink_auto_scaling_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "flink_window_minutes" {
+  description = "Duración de ventana de evento en minutos."
+  type        = number
+  default     = 1
+}
+
+variable "flink_out_of_order_seconds" {
+  description = "Tolerancia de desorden para watermarks."
+  type        = number
+  default     = 10
+}
+
+variable "flink_checkpoint_interval_ms" {
+  type    = number
+  default = 60000
+}
+
+variable "flink_min_pause_between_checkpoints_ms" {
+  type    = number
+  default = 30000
+}

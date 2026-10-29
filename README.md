@@ -139,3 +139,131 @@ Terraform 1.10 y posteriores permiten bloquear el estado directamente en S3 (`us
 ## Nota sobre la región
 
 Este proyecto se probó en `us-east-2` (Ohio). La cuenta de trabajo pertenece a una organización de AWS con una service control policy que bloquea la creación de recursos en `us-east-1`. Si tu cuenta tiene otras restricciones, ajustá la región en `bootstrap/`, en `environments/dev/backend.tf` y en `environments/dev/terraform.tfvars`.
+
+## Ingesta con Kinesis y Firehose
+
+Rama `feature/ingesta-kinesis`. Agrega un pipeline de ingesta de eventos:
+
+```
+productor --> Kinesis Data Stream (KMS, 2 shards) --> Firehose --> S3 (Data Lake)
+                                                         |
+                                                         +--> CloudWatch Logs (errores de entrega)
+```
+
+### Recursos nuevos
+
+| Módulo | Recurso | Descripción |
+|---|---|---|
+| `modules/datalake` | `aws_s3_bucket` | Bucket del Data Lake, con cifrado SSE y sin acceso público |
+| `modules/kinesis` | `aws_kinesis_stream` | Stream en modo `PROVISIONED`, 2 shards, `encryption_type = "KMS"`. El nombre sale de `project` y `environment` (`datalake-dev-events`) |
+| `modules/kinesis` | `aws_kms_key` + alias | Clave propia (con rotación) que cifra el stream |
+| `modules/kinesis` | `aws_kinesis_firehose_delivery_stream` | Source = el stream, destino S3, buffer de 5 MB o 60 s |
+| `modules/kinesis` | `aws_iam_role` + política | Rol de Firehose: leer del stream, descifrar con la clave, escribir en el prefijo del bucket y escribir logs |
+| `modules/kinesis` | `aws_cloudwatch_log_group` | Logs de errores de entrega de Firehose |
+
+Nota: el recurso de Firehose usa `destination = "extended_s3"`, que es el valor actual del proveedor de AWS para entregar a S3 (el valor `s3` es la forma antigua).
+
+### Desplegar
+
+```bash
+git checkout feature/ingesta-kinesis
+cd environments/dev
+terraform init
+terraform plan
+terraform apply
+```
+
+### Validar: enviar un evento de prueba
+
+```bash
+aws kinesis put-record \
+  --stream-name datalake-dev-events \
+  --partition-key sensor-1 \
+  --data '{"sensor_id":"s1","temperatura":21.5}' \
+  --cli-binary-format raw-in-base64-out \
+  --region us-east-2
+```
+
+Si funciona, devuelve un `ShardId` y un `SequenceNumber`.
+
+Firehose junta los datos hasta 60 segundos (o 5 MB), así que esperá un poco más de un minuto y listá el bucket:
+
+```bash
+aws s3 ls s3://datalake-<ID-DE-CUENTA>-dev/streaming/raw/ --recursive --region us-east-2
+```
+
+Los archivos quedan en `streaming/raw/AAAA/MM/DD/HH/`. Para ver el contenido:
+
+```bash
+aws s3 cp s3://<bucket>/<ruta-del-archivo> - --region us-east-2
+```
+
+Salida del `ls` de S3 con el archivo generado por Firehose:
+
+```
+(pegar acá la salida de aws s3 ls o una captura)
+```
+
+### Costos y limpieza
+
+El stream cobra por shard y por hora aunque no reciba datos (con 2 shards son unos centavos de dólar por hora). Cuando termines de validar:
+
+```bash
+cd environments/dev
+terraform destroy
+```
+
+## Procesamiento en tiempo real con Managed Service for Apache Flink (Módulo 3)
+
+El módulo agrega una aplicación Java de Apache Flink que lee directamente del Kinesis Data Stream `datalake-<environment>-events` creado arriba. Firehose sigue almacenando los eventos crudos en S3; Flink procesa el stream en paralelo.
+
+La lógica espera JSON con `sensor_id` y `temperatura`. Agrupa por sensor en ventanas tumbling de tiempo de evento de un minuto, y emite a los logs de CloudWatch un JSON con cantidad, promedio, mínimo y máximo. Para el tiempo de evento acepta `event_time` o `timestamp` como epoch en milisegundos o fecha ISO-8601. Si falta la marca de tiempo, usa la hora de ingestión como respaldo. El watermark admite diez segundos de desorden; los eventos que llegan más tarde que el watermark pueden quedar fuera de la ventana.
+
+La clave por `sensor_id` y el estado de la ventana administrado por Flink conservan los acumuladores durante la ventana. No se requiere estado keyed adicional fuera del estado de ventanas. Los checkpoints están activos cada 60 segundos, con 30 segundos mínimos entre ellos.
+
+### Paralelismo y KPUs
+
+El stream existente tiene dos shards y el job inicia con paralelismo 2 para que ambas particiones puedan procesarse concurrentemente. `parallelism_per_kpu = 1` deja un operador paralelo por KPU como configuración inicial; el consumo real de KPUs depende del grafo y carga del job. El autoescalado queda deshabilitado para que la capacidad y el costo sean previsibles. Se pueden ajustar los valores `flink_parallelism`, `flink_parallelism_per_kpu` y `flink_auto_scaling_enabled` en `environments/dev/terraform.tfvars`.
+
+La aplicación Managed Flink no se enlaza a la VPC privada: el job se comunica con Kinesis mediante el endpoint del servicio AWS y no requiere salida general a Internet ni acceso a servicios privados. Si más adelante se conecta a destinos privados, deberá añadirse la configuración de VPC, subredes y security groups junto con conectividad al destino.
+
+### Compilar y desplegar
+
+Requisitos adicionales: JDK 11 y Maven 3.8 o posterior.
+
+```bash
+cd flink
+mvn clean package
+cd ../environments/dev
+terraform init
+terraform plan
+terraform apply
+```
+
+Terraform carga `flink/target/flink-kinesis-processor.jar` al prefijo `applications/flink/` del bucket Data Lake y configura `aws_kinesisanalyticsv2_application`, el rol de ejecución, checkpoints, paralelismo y CloudWatch Logs. El job comienza desde `TRIM_HORIZON` para procesar los registros retenidos en el stream.
+
+Enviar un evento de ejemplo (se usa hora de ingestión si no se incluye timestamp):
+
+```bash
+aws kinesis put-record \
+  --stream-name datalake-dev-events \
+  --partition-key sensor-1 \
+  --data '{"sensor_id":"sensor-1","temperatura":21.5,"event_time":"2026-10-29T12:00:00Z"}' \
+  --cli-binary-format raw-in-base64-out --region us-east-2
+```
+
+La salida del sink `print` aparece en los logs de la aplicación. Para consultar la evidencia:
+
+```bash
+aws logs tail "$(terraform output -raw flink_log_group_name)" --since 10m --follow --region us-east-2
+```
+
+Adjuntá a la entrega una captura de la pestaña **Real-time dashboard / Graph** de la aplicación en la consola de Managed Service for Apache Flink o la salida de CloudWatch con líneas `temperature-summary`. Esta evidencia requiere desplegar y ejecutar el job en una cuenta AWS; Terraform y el código por sí solos no prueban una ejecución.
+
+### Estructura
+
+```text
+flink/                         # Código Java y Maven del job
+modules/flink/                 # Aplicación Managed Flink, IAM y logs
+environments/dev/ingesta.tf    # Sube el JAR y conecta Flink al stream del Módulo 2
+```
